@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+sdk/javascript/node_modules/
+dashboard/node_modules/
+
+# Env files - never commit real secrets
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+sdk/javascript/dist/
+dashboard/dist/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Misc
+coverage/
+*.tsbuildinfo

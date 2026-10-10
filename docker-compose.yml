@@ -1,0 +1,116 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: errsight-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: errsight
+      POSTGRES_PASSWORD: errsight
+      POSTGRES_DB: errsight
+    ports:
+      - '5432:5432'
+    volumes:
+      - errsight_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U errsight']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: errsight-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - errsight_redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # One-off: applies SQL migrations via tsx (full devDependencies live in
+  # the "build" stage), then exits. api/worker wait for it to succeed
+  # instead of racing it to create tables.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: build
+    container_name: errsight-migrate
+    command: ['npx', 'tsx', 'scripts/migrate.ts']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://errsight:errsight@postgres:5432/errsight
+      # migrate.ts only touches Postgres, but it transitively imports
+      # config/index.ts (via config/database.ts), which throws if
+      # NODE_ENV=production and JWT_SECRET is unset - without this, the
+      # migrate service would crash before running a single migration,
+      # and api/worker (which wait on it) would never start.
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in your .env before running docker-compose}
+    restart: 'no'
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: errsight-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://errsight:errsight@postgres:5432/errsight
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in your .env before running docker-compose}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-15m}
+      REFRESH_TOKEN_EXPIRES_DAYS: ${REFRESH_TOKEN_EXPIRES_DAYS:-30}
+      APP_URL: ${APP_URL:-http://localhost:5173}
+      INGEST_RATE_WINDOW_MS: ${INGEST_RATE_WINDOW_MS:-60000}
+      INGEST_RATE_MAX: ${INGEST_RATE_MAX:-100}
+      AUTH_RATE_WINDOW_MS: ${AUTH_RATE_WINDOW_MS:-900000}
+      AUTH_RATE_MAX: ${AUTH_RATE_MAX:-10}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+    ports:
+      - '4000:4000'
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: errsight-worker
+    command: ['node', 'dist/workers/processEvent.js']
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://errsight:errsight@postgres:5432/errsight
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in your .env before running docker-compose}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+
+volumes:
+  errsight_pg_data:
+  errsight_redis_data:
